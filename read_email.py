@@ -44,16 +44,20 @@ def read_latest_email(state: MeetingAgentState) -> dict:
         # 3. Select the mailbox you want to check (default is 'inbox')
         mail.select("inbox")
 
-        # 4. Search for emails (Here we search for "ALL". You could use "UNSEEN" for unread)
-        status, messages = mail.search(None, "ALL") # "UNSEEN" / "ALL" replaced with "UNSEEN" before activating initiate.py
-
-        # Convert the space-separated string of email IDs into a list
-        email_ids = messages[0].split()
+        # 4. Search for unread emails first, fallback to ALL if no unread
+        status, messages = mail.search(None, "UNSEEN")
+        email_ids = messages[0].split() if messages and messages[0] else []
+        
+        if not email_ids:
+            # If no unread, check recent ALL emails
+            status, messages = mail.search(None, "ALL")
+            email_ids = messages[0].split() if messages and messages[0] else []
 
         if email_ids:
-            # 5. Fetch the latest email (the last one in the list)
+            # Sort IDs numerically to always guarantee the latest chronological email
+            email_ids = sorted(email_ids, key=lambda x: int(x))
             latest_email_id = email_ids[-1]
-            print(f"Fetching email ID: {latest_email_id.decode()}...")
+            print(f"Fetching latest email ID: {latest_email_id.decode()} (from {len(email_ids)} emails)...")
             
             status, msg_data = mail.fetch(latest_email_id, "(RFC822)")
 
@@ -65,71 +69,88 @@ def read_latest_email(state: MeetingAgentState) -> dict:
                     auth_header = msg.get("Authentication-Results", "Not Found")
 
                     # Decode the email subject
-                    subject, encoding = decode_header(msg["Subject"])[0]
-                    if isinstance(subject, bytes):
-                        # If it's a bytes type, decode to string
-                        subject = subject.decode(encoding if encoding else "utf-8")
+                    subject_header = msg.get("Subject", "")
+                    if subject_header:
+                        decoded_chunks = decode_header(subject_header)
+                        subject_parts = []
+                        for text, encoding in decoded_chunks:
+                            if isinstance(text, bytes):
+                                subject_parts.append(text.decode(encoding or "utf-8", errors="replace"))
+                            else:
+                                subject_parts.append(str(text))
+                        subject = "".join(subject_parts)
+                    else:
+                        subject = "(No Subject)"
                         
-                    sender_name, sender_emailid = parseaddr(msg.get('From'))
-
+                    sender_name, sender_emailid = parseaddr(msg.get('From', ''))
                     original_message_id = msg.get("Message-ID")
 
-                    # Extract basic information
+                    # Extract basic information safely
                     print("="*50)
-                    print(f"Subject: {subject}")
-                    print(f"From: {msg.get('From')}")
+                    try:
+                        print(f"Subject: {subject}")
+                        print(f"From: {msg.get('From')}")
+                    except UnicodeEncodeError:
+                        print(f"Subject: {subject.encode('ascii', 'replace').decode()}")
                     print("="*50)
 
-                    # Extract the body of the email
+                    # Extract the body of the email safely
+                    full_body = ""
                     if msg.is_multipart():
-                        full_body = ""
-                        # Iterate over email parts to find the plain text body
                         for part in msg.walk():
                             content_type = part.get_content_type()
-                            content_disposition = str(part.get("Content-Disposition"))
+                            content_disposition = str(part.get("Content-Disposition", ""))
 
                             if content_type == "text/plain" and "attachment" not in content_disposition:
-                                chunk = part.get_payload(decode=True).decode()
-                                full_body += chunk
-
-                        state.body = full_body
-                        print(f"Body:\n{full_body}")
-
-                        return {
-                            "subject": subject, 
-                            "body": full_body,
-                            "error_message": None, # Clear any previous errors
-                            "sender_emailid": sender_emailid,
-                            "original_message_id": original_message_id,
-                            "auth_status": auth_header
-                        }
-
+                                payload = part.get_payload(decode=True)
+                                if payload:
+                                    charset = part.get_content_charset() or "utf-8"
+                                    try:
+                                        full_body += payload.decode(charset, errors="replace")
+                                    except Exception:
+                                        full_body += payload.decode("utf-8", errors="replace")
                     else:
-                        # If the email is not multipart, just read the payload
-                        body = msg.get_payload(decode=True).decode()
-                        state.body = body
-                        print(f"Body:\n{body}")
+                        payload = msg.get_payload(decode=True)
+                        if payload:
+                            charset = msg.get_content_charset() or "utf-8"
+                            try:
+                                full_body = payload.decode(charset, errors="replace")
+                            except Exception:
+                                full_body = payload.decode("utf-8", errors="replace")
 
-                        return {
-                            "subject": subject, 
-                            "body": body,
-                            "error_message": None, # Clear any previous errors
-                            "sender_emailid": sender_emailid,
-                            "original_message_id": original_message_id,
-                            "auth_status": auth_header
-                        }
+                    state.subject = subject
+                    state.body = full_body
+                    state.sender_emailid = sender_emailid
+                    state.original_message_id = original_message_id
+                    state.auth_status = auth_header
+
+                    try:
+                        print(f"Body length: {len(full_body)} characters")
+                    except Exception:
+                        pass
+
+                    return {
+                        "subject": subject, 
+                        "body": full_body,
+                        "error_message": None,
+                        "sender_emailid": sender_emailid,
+                        "original_message_id": original_message_id,
+                        "auth_status": auth_header
+                    }
                         
         else:
             print("No emails found in the inbox.")
 
         # 6. Logout and safely close the connection
         mail.logout()
+        return {}
 
     except imaplib.IMAP4.error as e:
         print(f"Authentication failed or IMAP error: {e}")
-        print("Note: If MFA is enabled, ensure you are using an App Password.")
+        return {"error_message": f"IMAP Error: {e}"}
     except Exception as e:
         print(f"An error occurred: {e}")
+        return {"error_message": f"Read Error: {e}"}
 
 
 # if __name__ == "__main__":

@@ -1,0 +1,14 @@
+requests>=2.31.0
+pydantic>=2.0.0
+email-validator>=2.0.0
+beautifulsoup4>=4.12.0
+python-dotenv>=1.0.0
+imapclient>=3.0.0
+langchain-core>=0.3.0
+langgraph>=0.2.0
+langchain-google-genai>=2.0.0
+langchain-huggingface>=0.1.0
+transformers>=4.40.0
+torch>=2.0.0
+accelerate>=0.26.0
+streamlit>=1.35.0
